@@ -1,5 +1,5 @@
 export type Severity = 'critical' | 'high' | 'medium' | 'low'
-export type ReviewStatus = 'draft' | 'in_review' | 'approved' | 'rejected'
+export type ReviewStatus = 'draft' | 'in_review' | 'approved' | 'rejected' | 'blocked'
 export type ThreatStatus = 'open' | 'mitigating' | 'mitigated' | 'accepted'
 export type ControlStatus = 'effective' | 'degraded' | 'failed' | 'planned'
 export type ActorRole = 'development' | 'security' | 'business'
@@ -199,4 +199,70 @@ export interface VersionDifference {
   added: VersionChange[]
   removed: VersionChange[]
   changed: string[]
+}
+
+export type CountersignBlockerKind =
+  | 'role_missing'
+  | 'rejected'
+  | 'evidence_required'
+  | 'control_failed'
+  | 'evidence_expired'
+  | 'evidence_invalid'
+  | 'evidence_missing'
+  | 'acceptance_expired'
+  | 'acceptance_missing'
+  | 'mitigation_conflict'
+
+export type CountersignBlockerCategory =
+  | 'opinion'
+  | 'evidence'
+  | 'acceptance'
+  | 'conflict'
+
+/**
+ * 会签有效性核对阻塞项。一次核对同时覆盖三方意见、控制证据有效期、
+ * 风险接受期限与缓解冲突，任何一项不满足都不能得到通过结论。
+ */
+export interface CountersignBlocker {
+  id: string
+  kind: CountersignBlockerKind
+  category: CountersignBlockerCategory
+  severity: Severity
+  /** 被核对的对象名称，例如控制名、风险编号、会签角色 */
+  subject: string
+  /** 问题描述 */
+  title: string
+  /** 当前值（证据/接受期限/意见的真实状态） */
+  currentValue: string
+  /** 需要补齐的具体动作 */
+  requiredAction: string
+  entityId: string
+}
+
+/** 三方中某个角色在当前修订下的会签情况 */
+export interface RoleDecisionState {
+  role: ActorRole
+  actor: string
+  decision: DecisionType
+  comment: string
+  createdAt: string
+}
+
+/**
+ * 单条威胁的会签有效性核对结果：
+ * - approved：三方齐备且无客观阻塞项
+ * - rejected：存在驳回意见
+ * - blocked：三方已签完或无需继续等待，但仍有客观阻塞项
+ * - in_review：三方尚未签完，且暂未出现阻塞结论
+ */
+export type CountersignOutcome = 'approved' | 'in_review' | 'blocked' | 'rejected'
+
+export interface CountersignEvaluation {
+  threatId: string
+  revision: number
+  outcome: CountersignOutcome
+  blockers: CountersignBlocker[]
+  roleStates: (RoleDecisionState | null)[]
+  decisions: ReviewDecision[]
+  checkedAt: string
 }

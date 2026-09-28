@@ -89,9 +89,15 @@ const createVersion = (): void => {
 
 const approvalLabel = (snapshot: VersionSnapshot): string =>
   `${snapshot.affectedThreatIds.filter((id) => {
-    const threat = store.data.threats.find((item) => item.id === id)
-    return threat?.reviewStatus === 'approved'
+    const evaluation = store.evaluationFor(id)
+    return evaluation?.outcome === 'approved'
   }).length}/${snapshot.affectedThreatIds.length}`
+
+const blockedLabel = (snapshot: VersionSnapshot): number =>
+  snapshot.affectedThreatIds.filter((id) => {
+    const evaluation = store.evaluationFor(id)
+    return evaluation && evaluation.outcome !== 'approved'
+  }).length
 </script>
 
 <template>
@@ -176,8 +182,15 @@ const approvalLabel = (snapshot: VersionSnapshot): string =>
           <Column header="受影响" style="width: 80px">
             <template #body="{ data }">{{ data.affectedThreatIds.length }} 条</template>
           </Column>
-          <Column header="通过" style="width: 80px">
-            <template #body="{ data }">{{ approvalLabel(data) }}</template>
+          <Column header="核对通过" style="width: 90px">
+            <template #body="{ data }">
+              <span :class="{ 'not-approved': blockedLabel(data) > 0 }">{{ approvalLabel(data) }}</span>
+            </template>
+          </Column>
+          <Column header="未通过" style="width: 80px">
+            <template #body="{ data }">
+              <span :class="{ 'blocked-count': blockedLabel(data) > 0 }">{{ blockedLabel(data) }} 条</span>
+            </template>
           </Column>
           <Column field="notes" header="说明" />
         </DataTable>
@@ -238,6 +251,19 @@ const approvalLabel = (snapshot: VersionSnapshot): string =>
 </template>
 
 <style scoped>
+.not-approved,
+.blocked-count {
+  font-weight: 700;
+}
+
+.blocked-count {
+  color: #c04a38;
+}
+
+.not-approved {
+  color: #b45309;
+}
+
 .compare-toolbar {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 40px minmax(0, 1fr);

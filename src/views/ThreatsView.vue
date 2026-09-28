@@ -42,6 +42,7 @@ const reviewOptions = [
   { label: '审核中', value: 'in_review' },
   { label: '已通过', value: 'approved' },
   { label: '已驳回', value: 'rejected' },
+  { label: '会签阻塞', value: 'blocked' },
 ]
 const categoryOptions = [
   { label: '身份伪造', value: 'spoofing' },
@@ -282,8 +283,11 @@ const saveThreat = (): void => {
           <div class="status-line">
             <StatusTag :value="selectedThreat.severity" kind="severity" />
             <StatusTag :value="selectedThreat.status" kind="status" />
-            <StatusTag :value="selectedThreat.reviewStatus" kind="review" />
-            <span class="muted">v1.{{ selectedThreat.revision }}</span>
+            <StatusTag
+              :value="store.evaluationFor(selectedThreat.id)?.outcome ?? selectedThreat.reviewStatus"
+              kind="review"
+            />
+            <span class="muted">会签核对结论 v1.{{ selectedThreat.revision }}</span>
           </div>
 
           <p class="description">{{ selectedThreat.description }}</p>

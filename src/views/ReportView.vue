@@ -26,12 +26,14 @@ const report = computed(() => {
         )
       : ['- 未包含']),
     '',
-    '## 会签意见',
+    '## 会签意见（历史可查）',
     ...(includeDecisions.value
-      ? store.data.decisions.map(
-          (decision) =>
-            `- ${decision.actor}/${decision.role}/${decision.decision}：${decision.comment}`,
-        )
+      ? [...store.data.decisions]
+          .sort((a, b) => a.revision - b.revision || a.createdAt.localeCompare(b.createdAt))
+          .map(
+            (decision) =>
+              `- v1.${decision.revision} ${decision.actor}/${decision.role}/${decision.decision}：${decision.comment}`,
+          )
       : ['- 未包含']),
     '',
     '## 审计轨迹',

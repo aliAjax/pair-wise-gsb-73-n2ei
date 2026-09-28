@@ -3,6 +3,7 @@ import { defineStore } from 'pinia'
 import type {
   ActorRole,
   AuditEvent,
+  CountersignEvaluation,
   DecisionType,
   Threat,
   ThreatModelState,
@@ -10,9 +11,12 @@ import type {
 } from '@/models/domain'
 import { createId, loadState, resetState, saveState } from '@/services/repository'
 import {
+  countersignOutcomeLabel,
   dashboardMetrics,
   decisionsForThreat,
+  evaluateCountersign,
   getValidationIssues,
+  isExpired,
   reviewProgress,
 } from '@/services/selectors'
 
@@ -39,14 +43,48 @@ export const useThreatModelStore = defineStore('threat-model', () => {
 
   const metrics = computed(() => dashboardMetrics(data.value))
   const issues = computed(() => getValidationIssues(data.value))
+
+  /**
+   * 每条威胁当前修订的会签有效性核对结果。证据到期、风险接受过期、
+   * 缓解冲突或三方意见变化都会实时反映，不再依赖曾经落库的 reviewStatus。
+   */
+  const countersigns = computed(() => {
+    const map = new Map<string, CountersignEvaluation>()
+    data.value.threats.forEach((threat) => {
+      map.set(threat.id, evaluateCountersign(data.value, threat))
+    })
+    return map
+  })
+
+  const evaluationFor = (threatId: string): CountersignEvaluation | undefined =>
+    countersigns.value.get(threatId)
+
   const pendingReviews = computed(() =>
-    data.value.threats.filter((threat) => threat.reviewStatus === 'in_review'),
+    data.value.threats.filter((threat) => {
+      if (threat.reviewStatus === 'draft') return false
+      return ['in_review', 'blocked'].includes(evaluationFor(threat.id)?.outcome ?? 'in_review')
+    }),
   )
 
+  /**
+   * 依据统一核对结果回写审核状态：任何过期/冲突/驳回场景都不允许保持 approved。
+   * 只更新内存状态，避免在持久化流程中递归写盘。
+   */
+  const reconcileReviewStatuses = (): void => {
+    data.value.threats.forEach((threat) => {
+      if (threat.reviewStatus === 'draft') return
+      threat.reviewStatus = evaluationFor(threat.id)?.outcome ?? threat.reviewStatus
+    })
+  }
+
   const persist = (): void => {
+    reconcileReviewStatuses()
     saveState(data.value)
     lastSavedAt.value = new Date().toISOString()
   }
+
+  // 载入历史仓库后立即核对一次：曾经落库的 approved 若已过期/冲突，页面不再按已通过展示。
+  reconcileReviewStatuses()
 
   const appendAudit = (
     entityType: string,
@@ -120,17 +158,19 @@ export const useThreatModelStore = defineStore('threat-model', () => {
     }
     data.value.currentRevision = revision
     data.value.versions.unshift(snapshot)
-    data.value.threats = data.value.threats.map((threat) => {
-      if (!affectedThreatIds.includes(threat.id)) {
-        return { ...threat, revision }
-      }
-      return { ...threat, revision, reviewStatus: 'in_review' }
-    })
+    // 只有受影响威胁提升修订号并重新会签；其余威胁结论继续保留。
+    const affected = new Set(affectedThreatIds)
+    data.value.threats = data.value.threats.map((threat) =>
+      affected.has(threat.id)
+        ? { ...threat, revision, reviewStatus: 'in_review' as const }
+        : threat,
+    )
+    reconcileReviewStatuses()
     appendAudit(
       'version',
       snapshot.id,
       '创建版本',
-      `${label} 已创建，${affectedThreatIds.length} 条威胁进入重新审核`,
+      `${label} 已创建，${affectedThreatIds.length} 条威胁进入重新审核，其余会签结论继续保留`,
     )
     persist()
     return snapshot
@@ -159,21 +199,9 @@ export const useThreatModelStore = defineStore('threat-model', () => {
       revision: threat.revision,
     })
 
-    const currentDecisions = decisionsForThreat(data.value.decisions, threatId, threat.revision)
-    const requiredRoles: ActorRole[] = ['development', 'security', 'business']
-    const allSubmitted = requiredRoles.every((requiredRole) =>
-      currentDecisions.some((item) => item.role === requiredRole),
-    )
-    if (currentDecisions.some((item) => item.decision === 'rejected')) {
-      threat.reviewStatus = 'rejected'
-    } else if (
-      allSubmitted &&
-      currentDecisions.every((item) => item.decision === 'approved')
-    ) {
-      threat.reviewStatus = 'approved'
-    } else {
-      threat.reviewStatus = 'in_review'
-    }
+    // 会签是否有效由统一核对给出：证据过期、接受过期、缓解冲突时即使三方都点了通过也不能通过。
+    const evaluation = evaluateCountersign(data.value, threat)
+    threat.reviewStatus = evaluation.outcome
 
     const decisionLabel: Record<DecisionType, string> = {
       accept: '接受',
@@ -222,10 +250,15 @@ export const useThreatModelStore = defineStore('threat-model', () => {
 
   const resetDemo = (): void => {
     data.value = resetState()
+    reconcileReviewStatuses()
     lastSavedAt.value = new Date().toISOString()
   }
 
   const exportReport = (): string => {
+    const blockedCount = data.value.threats.filter((threat) => {
+      const outcome = evaluationFor(threat.id)?.outcome
+      return threat.reviewStatus !== 'draft' && outcome && outcome !== 'approved'
+    }).length
     const lines = [
       `# ${data.value.boundary.name} 威胁建模报告`,
       '',
@@ -240,29 +273,61 @@ export const useThreatModelStore = defineStore('threat-model', () => {
       `- 开放关键威胁：${metrics.value.critical}`,
       `- 威胁覆盖率：${metrics.value.coverage}%`,
       `- 待处理校验问题：${issues.value.length}`,
+      `- 会签核对未通过威胁：${blockedCount}（含阻塞、审核中、驳回，均不得计作已完成会签）`,
       '',
       '## 威胁清单',
-      ...data.value.threats.map(
-        (threat) =>
-          `- ${threat.code} [${threat.severity}/${threat.reviewStatus}] ${threat.title}：${threat.description}`,
-      ),
+      ...data.value.threats.map((threat) => {
+        const evaluation = evaluationFor(threat.id)
+        const conclusion = evaluation
+          ? countersignOutcomeLabel(evaluation.outcome)
+          : threat.reviewStatus
+        return `- ${threat.code} [${threat.severity}/${conclusion}@v1.${threat.revision}] ${threat.title}：${threat.description}`
+      }),
       '',
+      '## 会签有效性核对',
+      '> 同一次判断覆盖三方意见、证据有效期、风险接受期限与缓解冲突；存在阻塞时不得得出通过结论。',
+      ...data.value.threats.flatMap((threat) => {
+        const evaluation = evaluationFor(threat.id)
+        if (!evaluation || threat.reviewStatus === 'draft') return []
+        const header = `### ${threat.code} ${threat.title}（v1.${threat.revision}）：${countersignOutcomeLabel(evaluation.outcome)}`
+        if (evaluation.outcome === 'approved') {
+          return [
+            header,
+            `- 三方意见：${evaluation.roleStates
+              .map((state) => (state ? `${state.actor}/${state.decision}` : '缺签'))
+              .join('、')}`,
+            '- 证据有效期、风险接受期限、缓解冲突：全部通过',
+            '',
+          ]
+        }
+        return [
+          header,
+          ...evaluation.blockers.map(
+            (blocker) =>
+              `- [${blocker.severity}] ${blocker.title}｜条目：${blocker.subject}｜当前值：${blocker.currentValue}｜待补动作：${blocker.requiredAction}`,
+          ),
+          '',
+        ]
+      }),
       '## 风险接受',
       ...data.value.risks
         .filter((risk) => risk.status === 'accepted')
-        .map(
-          (risk) =>
-            `- ${risk.code} ${risk.title}，有效至 ${risk.acceptanceExpiresAt ?? '未设置'}，条件：${risk.acceptanceCondition ?? '未填写'}`,
-        ),
+        .map((risk) => {
+          const expired = isExpired(risk.acceptanceExpiresAt)
+          return `- ${risk.code} ${risk.title}，有效至 ${risk.acceptanceExpiresAt ?? '未设置'}${expired ? '（已过期，会签核对阻塞）' : ''}，条件：${risk.acceptanceCondition ?? '未填写'}`
+        }),
       '',
       '## 校验问题',
       ...issues.value.map((issue) => `- [${issue.severity}] ${issue.title}：${issue.detail}`),
       '',
-      '## 会签记录',
-      ...data.value.decisions.map(
-        (decision) =>
-          `- ${decision.createdAt} ${decision.actor}（${decision.role}）${decision.decision}：${decision.comment}`,
-      ),
+      '## 会签记录（历史可查）',
+      ...data.value.decisions
+        .slice()
+        .sort((a, b) => a.revision - b.revision || a.createdAt.localeCompare(b.createdAt))
+        .map(
+          (decision) =>
+            `- v1.${decision.revision} ${decision.createdAt} ${decision.actor}（${decision.role}）${decision.decision}：${decision.comment}`,
+        ),
     ]
     return lines.join('\n')
   }
@@ -272,6 +337,7 @@ export const useThreatModelStore = defineStore('threat-model', () => {
     lastSavedAt,
     metrics,
     issues,
+    countersigns,
     pendingReviews,
     saveEntity,
     removeEntity,
@@ -285,5 +351,8 @@ export const useThreatModelStore = defineStore('threat-model', () => {
     resetDemo,
     exportReport,
     reviewProgress,
+    decisionsForThreat,
+    evaluationFor,
+    countersignOutcomeLabel,
   }
 })

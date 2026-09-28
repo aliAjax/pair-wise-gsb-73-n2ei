@@ -104,6 +104,68 @@ const mitigations: MitigationTask[] = [
 ]
 
 const decisions: ReviewDecision[] = [
+  // —— v1.0 基线的历史会签：三方均已通过，版本升级后作为历史保留可查 ——
+  {
+    id: 'dec-h01',
+    threatId: 'thr-01',
+    actor: '赵恺',
+    role: 'development',
+    decision: 'approved',
+    comment: 'v1.0 基线下管理入口访问控制满足要求。',
+    createdAt: '2026-08-25T10:02:00+08:00',
+    revision: 1,
+  },
+  {
+    id: 'dec-h02',
+    threatId: 'thr-01',
+    actor: '王岚',
+    role: 'security',
+    decision: 'approved',
+    comment: 'v1.0 基线鉴权测试证据齐备，同意通过。',
+    createdAt: '2026-08-25T11:20:00+08:00',
+    revision: 1,
+  },
+  {
+    id: 'dec-h03',
+    threatId: 'thr-01',
+    actor: '宋雨',
+    role: 'business',
+    decision: 'approved',
+    comment: 'v1.0 基线业务侧无异议。',
+    createdAt: '2026-08-26T09:40:00+08:00',
+    revision: 1,
+  },
+  {
+    id: 'dec-h04',
+    threatId: 'thr-02',
+    actor: '赵恺',
+    role: 'development',
+    decision: 'approved',
+    comment: 'v1.0 基线下密钥托管方案通过会签。',
+    createdAt: '2026-08-25T14:05:00+08:00',
+    revision: 1,
+  },
+  {
+    id: 'dec-h05',
+    threatId: 'thr-02',
+    actor: '王岚',
+    role: 'security',
+    decision: 'approved',
+    comment: 'v1.0 基线加密配置证据有效。',
+    createdAt: '2026-08-25T15:18:00+08:00',
+    revision: 1,
+  },
+  {
+    id: 'dec-h06',
+    threatId: 'thr-02',
+    actor: '宋雨',
+    role: 'business',
+    decision: 'approved',
+    comment: 'v1.0 基线归档业务风险可接受。',
+    createdAt: '2026-08-26T10:02:00+08:00',
+    revision: 1,
+  },
+  // —— v1.1 当前修订 ——
   {
     id: 'dec-01',
     threatId: 'thr-01',
@@ -114,6 +176,8 @@ const decisions: ReviewDecision[] = [
     createdAt: '2026-09-24T09:18:00+08:00',
     revision: 2,
   },
+  // thr-02：三方都点了通过，但控制 ctl-02 已降级且证据 ev-02 过期失效，
+  // 页面曾把它算作已完成会签——统一核对后应为"会签阻塞"。
   {
     id: 'dec-02',
     threatId: 'thr-02',
@@ -125,6 +189,47 @@ const decisions: ReviewDecision[] = [
     revision: 2,
   },
   {
+    id: 'dec-04',
+    threatId: 'thr-02',
+    actor: '王岚',
+    role: 'security',
+    decision: 'approved',
+    comment: '同意按轮换方案通过。',
+    createdAt: '2026-09-26T15:02:00+08:00',
+    revision: 2,
+  },
+  {
+    id: 'dec-05',
+    threatId: 'thr-02',
+    actor: '宋雨',
+    role: 'business',
+    decision: 'approved',
+    comment: '轮换窗口对业务无影响，同意。',
+    createdAt: '2026-09-26T16:10:00+08:00',
+    revision: 2,
+  },
+  // thr-03 未被 v1.1 标记为受影响威胁，沿用 v1.0 会签；风险接受已过期时其保留结论自动变为阻塞。
+  {
+    id: 'dec-h07',
+    threatId: 'thr-03',
+    actor: '赵恺',
+    role: 'development',
+    decision: 'approved',
+    comment: 'v1.0 基线下导出权限模型满足要求。',
+    createdAt: '2026-08-25T16:22:00+08:00',
+    revision: 1,
+  },
+  {
+    id: 'dec-h08',
+    threatId: 'thr-03',
+    actor: '王岚',
+    role: 'security',
+    decision: 'approved',
+    comment: 'v1.0 基线越权检测有效，同意通过。',
+    createdAt: '2026-08-25T17:05:00+08:00',
+    revision: 1,
+  },
+  {
     id: 'dec-03',
     threatId: 'thr-03',
     actor: '宋雨',
@@ -132,7 +237,7 @@ const decisions: ReviewDecision[] = [
     decision: 'degrade',
     comment: '首期接受按日抽检，月结窗口需双人审批。',
     createdAt: '2026-09-27T11:05:00+08:00',
-    revision: 2,
+    revision: 1,
   },
 ]
 
@@ -190,10 +295,10 @@ const audit: AuditEvent[] = [
     id: 'aud-03',
     entityType: 'risk',
     entityId: 'risk-03',
-    action: '风险接受即将过期',
+    action: '风险接受已过期',
     actor: '系统',
-    createdAt: '2026-09-28T08:00:00+08:00',
-    detail: '风险接受将在 2026-10-01 过期。',
+    createdAt: '2026-09-16T08:00:00+08:00',
+    detail: '风险接受已于 2026-09-15 过期，相关保留会签结论已自动转为阻塞。',
   },
 ]
 
@@ -424,7 +529,7 @@ export const createSeedState = (): ThreatModelState => ({
       attackPathIds: ['path-02'],
       controlIds: ['ctl-02', 'ctl-03'],
       riskIds: ['risk-02'],
-      reviewStatus: 'approved',
+      reviewStatus: 'blocked',
       revision: 2,
     },
     {
@@ -441,8 +546,8 @@ export const createSeedState = (): ThreatModelState => ({
       attackPathIds: ['path-03'],
       controlIds: ['ctl-03', 'ctl-04'],
       riskIds: ['risk-03'],
-      reviewStatus: 'in_review',
-      revision: 2,
+      reviewStatus: 'blocked',
+      revision: 1,
     },
   ],
   attackPaths: [
@@ -498,7 +603,7 @@ export const createSeedState = (): ThreatModelState => ({
       impact: 4,
       status: 'accepted',
       owner: '数据治理组',
-      acceptanceExpiresAt: '2026-10-01',
+      acceptanceExpiresAt: '2026-09-15',
       acceptanceCondition: '过渡期内按日抽检导出记录，发现异常立即冻结账号。',
     },
     {

@@ -107,6 +107,11 @@ const componentName = (id: string): string =>
                 会签进度
               </span>
             </div>
+            <StatusTag
+              :value="store.evaluationFor(threat.id)?.outcome ?? threat.reviewStatus"
+              kind="review"
+              class="review-outcome"
+            />
             <span class="muted">{{ threat.componentIds.map(componentName).join(' / ') }}</span>
           </article>
           <div v-if="store.pendingReviews.length === 0" class="empty-state">没有待会签威胁。</div>
@@ -208,8 +213,9 @@ const componentName = (id: string): string =>
 
 .review-row {
   display: grid;
-  grid-template-columns: 58px minmax(0, 1fr);
+  grid-template-columns: 58px minmax(0, 1fr) auto;
   gap: 10px;
+  align-items: center;
   padding: 14px 0;
   border-bottom: 1px solid #edf0f4;
 }
@@ -229,6 +235,10 @@ const componentName = (id: string): string =>
 .review-row > .muted {
   grid-column: 2;
   font-size: 11px;
+}
+
+.review-outcome {
+  justify-self: end;
 }
 
 .panel-actions {
