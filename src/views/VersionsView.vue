@@ -90,8 +90,19 @@ const createVersion = (): void => {
 const approvalLabel = (snapshot: VersionSnapshot): string =>
   `${snapshot.affectedThreatIds.filter((id) => {
     const threat = store.data.threats.find((item) => item.id === id)
-    return threat?.reviewStatus === 'approved'
+    if (!threat) return false
+    const assessment = store.assessmentFor(id)
+    // 仅统计属于该版本修订基线的威胁，且以核对有效性为准而非历史字段
+    return assessment?.effective && assessment.revision === snapshot.revision
   }).length}/${snapshot.affectedThreatIds.length}`
+
+const blockedLabel = (snapshot: VersionSnapshot): string => {
+  const count = snapshot.affectedThreatIds.filter((id) => {
+    const assessment = store.assessmentFor(id)
+    return assessment && !assessment.effective
+  }).length
+  return count === 0 ? '无阻塞' : `${count} 条阻塞`
+}
 </script>
 
 <template>
@@ -178,6 +189,13 @@ const approvalLabel = (snapshot: VersionSnapshot): string =>
           </Column>
           <Column header="通过" style="width: 80px">
             <template #body="{ data }">{{ approvalLabel(data) }}</template>
+          </Column>
+          <Column header="会签核对" style="width: 110px">
+            <template #body="{ data }">
+              <span :class="{ 'blocked-text': !blockedLabel(data).startsWith('无') }">
+                {{ blockedLabel(data) }}
+              </span>
+            </template>
           </Column>
           <Column field="notes" header="说明" />
         </DataTable>
@@ -369,5 +387,10 @@ const approvalLabel = (snapshot: VersionSnapshot): string =>
 .audit-item span {
   color: #8992a1;
   font-size: 10px;
+}
+
+.blocked-text {
+  color: #c64b39;
+  font-weight: 700;
 }
 </style>

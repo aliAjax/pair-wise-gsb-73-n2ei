@@ -190,6 +190,32 @@ export interface ValidationIssue {
   entityId: string
 }
 
+export type CountersignBlockerKind =
+  | 'missing_signature'
+  | 'decision_not_approved'
+  | 'control_evidence_expired'
+  | 'risk_acceptance_expired'
+  | 'mitigation_conflict'
+
+export interface CountersignBlocker {
+  id: string
+  kind: CountersignBlockerKind
+  label: string
+  entityId: string
+  title: string
+  currentValue: string
+  detail: string
+  remediation: string
+}
+
+export interface CountersignAssessment {
+  threatId: string
+  revision: number
+  effective: boolean
+  reviewStatus: ReviewStatus
+  blockers: CountersignBlocker[]
+}
+
 export interface VersionChange {
   category: string
   id: string

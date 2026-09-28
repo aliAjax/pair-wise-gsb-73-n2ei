@@ -90,6 +90,9 @@ const filteredThreats = computed(() => {
 const selectedThreat = computed(
   () => store.data.threats.find((threat) => threat.id === selectedId.value) ?? null,
 )
+const selectedAssessment = computed(() =>
+  selectedThreat.value ? store.assessmentFor(selectedThreat.value.id) : undefined,
+)
 const relatedComponents = computed(
   () =>
     selectedThreat.value?.componentIds
@@ -282,9 +285,30 @@ const saveThreat = (): void => {
           <div class="status-line">
             <StatusTag :value="selectedThreat.severity" kind="severity" />
             <StatusTag :value="selectedThreat.status" kind="status" />
-            <StatusTag :value="selectedThreat.reviewStatus" kind="review" />
+            <StatusTag :value="selectedAssessment?.reviewStatus ?? selectedThreat.reviewStatus" kind="review" />
             <span class="muted">v1.{{ selectedThreat.revision }}</span>
           </div>
+
+          <section v-if="selectedAssessment" class="countersign-box" :class="{ blocked: !selectedAssessment.effective }">
+            <div class="countersign-head">
+              <strong>会签有效性核对</strong>
+              <StatusTag
+                :value="selectedAssessment.effective ? 'approved' : 'in_review'"
+                kind="review"
+              />
+            </div>
+            <p v-if="selectedAssessment.effective" class="countersign-ok">
+              三方意见、证据有效期、风险接受期限与缓解冲突同次核对通过。
+            </p>
+            <ul v-else class="countersign-blockers">
+              <li v-for="blocker in selectedAssessment.blockers" :key="blocker.id">
+                <span class="blocker-kind">{{ blocker.label }}</span>
+                <strong>{{ blocker.title }}</strong>
+                <p>{{ blocker.currentValue }}</p>
+                <p class="blocker-action">待补：{{ blocker.remediation }}</p>
+              </li>
+            </ul>
+          </section>
 
           <p class="description">{{ selectedThreat.description }}</p>
 
@@ -504,6 +528,73 @@ const saveThreat = (): void => {
   align-items: center;
   gap: 8px;
   padding: 12px 18px;
+}
+
+.countersign-box {
+  margin: 0 18px 14px;
+  padding: 12px 14px;
+  border: 1px solid #cde4d6;
+  border-radius: 6px;
+  background: #f3faf6;
+}
+
+.countersign-box.blocked {
+  border-color: #f0cfc7;
+  background: #fdf5f3;
+}
+
+.countersign-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.countersign-head strong {
+  font-size: 12px;
+}
+
+.countersign-ok {
+  margin: 8px 0 0;
+  color: #2e684f;
+  font-size: 12px;
+}
+
+.countersign-blockers {
+  display: grid;
+  gap: 9px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.countersign-blockers li {
+  padding: 9px 10px;
+  border: 1px solid #f2d8d1;
+  border-left: 3px solid #c64b39;
+  border-radius: 4px;
+  background: #fff;
+}
+
+.blocker-kind {
+  display: inline-block;
+  margin-bottom: 5px;
+  padding: 1px 7px;
+  border-radius: 9px;
+  color: #fff;
+  background: #c64b39;
+  font-size: 10px;
+}
+
+.countersign-blockers p {
+  margin: 4px 0 0;
+  color: #5b6678;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.countersign-blockers .blocker-action {
+  color: #9a3f2d;
+  font-weight: 600;
 }
 
 .description {

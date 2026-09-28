@@ -1,5 +1,8 @@
 import type {
   ControlEvidence,
+  CountersignAssessment,
+  CountersignBlocker,
+  CountersignBlockerKind,
   ReviewDecision,
   Risk,
   Severity,
@@ -11,6 +14,16 @@ import type {
 } from '@/models/domain'
 
 const TODAY = new Date('2026-09-29T00:00:00+08:00')
+
+export const REQUIRED_ROLES = ['development', 'security', 'business'] as const
+
+const ROLE_LABELS: Record<string, string> = {
+  development: '开发负责人',
+  security: '安全负责人',
+  business: '业务负责人',
+}
+
+export const roleLabel = (role: string): string => ROLE_LABELS[role] ?? role
 
 export const riskScore = (risk: Risk): number => risk.likelihood * risk.impact
 
@@ -25,6 +38,222 @@ export const isExpired = (date?: string): boolean =>
   Boolean(date && new Date(`${date}T23:59:59+08:00`).getTime() < TODAY.getTime())
 
 export const evidenceIsExpired = (evidence: ControlEvidence): boolean => isExpired(evidence.expiresAt)
+
+const ACTION_LABELS: Record<string, string> = {
+  restrict: '限制访问',
+  monitor: '持续监测',
+  encrypt: '加密保护',
+  isolate: '隔离处置',
+  allow_with_condition: '有条件放行',
+}
+
+const DECISION_LABELS: Record<string, string> = {
+  approved: '通过',
+  accept: '有条件接受',
+  degrade: '同意降级',
+  evidence_required: '要求补证',
+  rejected: '驳回',
+}
+
+export const decisionLabel = (decision?: string): string =>
+  decision ? (DECISION_LABELS[decision] ?? decision) : '待提交'
+
+const makeBlocker = (
+  threatId: string,
+  kind: CountersignBlockerKind,
+  label: string,
+  entityId: string,
+  title: string,
+  currentValue: string,
+  detail: string,
+  remediation: string,
+): CountersignBlocker => ({
+  id: `cs-${threatId}-${kind}-${entityId}`,
+  kind,
+  label,
+  entityId,
+  title,
+  currentValue,
+  detail,
+  remediation,
+})
+
+const evidenceState = (item: ControlEvidence): string => {
+  if (evidenceIsExpired(item)) return `${item.title} 已于 ${item.expiresAt} 到期`
+  if (!item.valid) return `${item.title} 已被标记为失效`
+  return `${item.title} 有效至 ${item.expiresAt}`
+}
+
+/**
+ * 把三方意见、关联控制证据有效期、风险接受期限与缓解冲突放进同一次判断，
+ * 只要存在任一阻塞项，该威胁的会签结论就不能成立。
+ */
+export const countersignBlockers = (
+  state: ThreatModelState,
+  threat: Threat,
+): CountersignBlocker[] => {
+  const blockers: CountersignBlocker[] = []
+  const decisions = decisionsForThreat(state.decisions, threat.id, threat.revision)
+
+  REQUIRED_ROLES.forEach((role) => {
+    const decision = decisions.find((item) => item.role === role)
+    if (!decision) {
+      blockers.push(
+        makeBlocker(
+          threat.id,
+          'missing_signature',
+          '三方意见',
+          role,
+          `${roleLabel(role)}尚未会签`,
+          '当前值：待提交',
+          `v1.${threat.revision} 版本下缺少 ${roleLabel(role)} 的会签意见。`,
+          `请 ${roleLabel(role)} 在会签中心提交意见后再核对。`,
+        ),
+      )
+    } else if (decision.decision !== 'approved') {
+      blockers.push(
+        makeBlocker(
+          threat.id,
+          'decision_not_approved',
+          '三方意见',
+          decision.id,
+          `${roleLabel(role)}意见未达成通过`,
+          `当前值：${decisionLabel(decision.decision)}（${decision.actor}）`,
+          `意见说明：${decision.comment || '未填写'}`,
+          decision.decision === 'rejected'
+            ? '该威胁已被驳回，需调整方案并重新提交三方意见。'
+            : '需先落实该意见中的条件或补证要求，再由其重新给出“通过”意见。',
+        ),
+      )
+    }
+  })
+
+  threat.controlIds.forEach((controlId) => {
+    const control = state.controls.find((item) => item.id === controlId)
+    if (!control) {
+      blockers.push(
+        makeBlocker(
+          threat.id,
+          'control_evidence_expired',
+          '证据有效期',
+          controlId,
+          '关联控制已从当前模型移除',
+          '当前值：控制不存在',
+          '会签所依赖的控制在后续版本中被删除，结论失去依据。',
+          '请重新关联有效控制并补充证据，或重新评估该威胁。',
+        ),
+      )
+      return
+    }
+    const linkedEvidence = control.evidenceIds
+      .map((id) => state.evidence.find((item) => item.id === id))
+      .filter((item): item is ControlEvidence => Boolean(item))
+    const validEvidence = linkedEvidence.filter((item) => item.valid && !evidenceIsExpired(item))
+    const controlUnhealthy = control.status === 'failed' || control.status === 'degraded'
+    if (validEvidence.length === 0 || controlUnhealthy) {
+      const statusText =
+        control.status === 'failed'
+          ? '控制已失效'
+          : control.status === 'degraded'
+            ? '控制能力降级'
+            : '控制状态有效'
+      const evidenceText = linkedEvidence.length
+        ? linkedEvidence.map(evidenceState).join('；')
+        : '未登记任何控制证据'
+      blockers.push(
+        makeBlocker(
+          threat.id,
+          'control_evidence_expired',
+          '证据有效期',
+          control.id,
+          `${control.name} 控制证据不满足会签条件`,
+          `当前值：${statusText}；${evidenceText}`,
+          '未找到未过期且状态有效的控制证据，无法证明控制在会签时点持续有效。',
+          controlUnhealthy
+            ? '先恢复控制能力，再重新采集未过期的有效证据。'
+            : '请补充新的控制证据并登记到期日，待证据有效后重新核对。',
+        ),
+      )
+    }
+  })
+
+  threat.riskIds.forEach((riskId) => {
+    const risk = state.risks.find((item) => item.id === riskId)
+    if (!risk) return
+    if (risk.status === 'accepted' && isExpired(risk.acceptanceExpiresAt)) {
+      blockers.push(
+        makeBlocker(
+          threat.id,
+          'risk_acceptance_expired',
+          '风险接受期限',
+          risk.id,
+          `${risk.code} 风险接受已过期`,
+          `当前值：接受到期日 ${risk.acceptanceExpiresAt ?? '未设置'}（已过期）`,
+          `接受条件：${risk.acceptanceCondition || '未填写'}`,
+          '请在风险矩阵中续期风险接受（写明新的到期日与条件），或将风险转为处置并补充缓解证据。',
+        ),
+      )
+    }
+  })
+
+  const conflictGroups = new Map<string, ThreatModelState['mitigations']>()
+  state.mitigations
+    .filter((task) => task.threatId === threat.id && task.conflictGroup)
+    .forEach((task) => {
+      const group = conflictGroups.get(task.conflictGroup as string) ?? []
+      group.push(task)
+      conflictGroups.set(task.conflictGroup as string, group)
+    })
+  conflictGroups.forEach((tasks, group) => {
+    const actions = new Set(tasks.map((task) => task.action))
+    if (actions.has('allow_with_condition') && (actions.has('restrict') || actions.has('isolate'))) {
+      blockers.push(
+        makeBlocker(
+          threat.id,
+          'mitigation_conflict',
+          '缓解冲突',
+          group,
+          '同一威胁存在互斥缓解措施',
+          `当前值：${tasks
+            .map((task) => `${task.title}=${ACTION_LABELS[task.action] ?? task.action}`)
+            .join('；')}`,
+          '“有条件放行”与“限制访问/隔离处置”不能同时作为该威胁的处置方向。',
+          '请统一处置方向（移除或调整互斥任务之一），确认后重新提交会签核对。',
+        ),
+      )
+    }
+  })
+
+  return blockers
+}
+
+/**
+ * 计算某条威胁在当前模型状态下的真实会签结论。
+ * 历史意见（旧 revision）仍完整保留在 decisions 中，仅当前 revision 参与有效性判断。
+ */
+export const assessCountersign = (
+  state: ThreatModelState,
+  threat: Threat,
+): CountersignAssessment => {
+  const blockers = countersignBlockers(state, threat)
+  const decisions = decisionsForThreat(state.decisions, threat.id, threat.revision)
+  const rejected = decisions.some((decision) => decision.decision === 'rejected')
+  const reviewStatus = rejected
+    ? 'rejected'
+    : blockers.length === 0
+      ? 'approved'
+      : 'in_review'
+  return {
+    threatId: threat.id,
+    revision: threat.revision,
+    effective: reviewStatus === 'approved',
+    reviewStatus,
+    blockers,
+  }
+}
+
+export const assessAllCountersigns = (state: ThreatModelState): CountersignAssessment[] =>
+  state.threats.map((threat) => assessCountersign(state, threat))
 
 export const getValidationIssues = (state: ThreatModelState): ValidationIssue[] => {
   const issues: ValidationIssue[] = []
@@ -208,13 +437,18 @@ export interface DashboardMetrics {
   coverage: number
   openIssues: number
   pendingReviews: number
+  effectiveCountersigns: number
 }
 
-export const dashboardMetrics = (state: ThreatModelState): DashboardMetrics => ({
-  components: state.components.length,
-  threats: state.threats.length,
-  critical: openCriticalThreats(state.threats),
-  coverage: threatCoverage(state),
-  openIssues: getValidationIssues(state).length,
-  pendingReviews: state.threats.filter((threat) => threat.reviewStatus === 'in_review').length,
-})
+export const dashboardMetrics = (state: ThreatModelState): DashboardMetrics => {
+  const assessments = assessAllCountersigns(state)
+  return {
+    components: state.components.length,
+    threats: state.threats.length,
+    critical: openCriticalThreats(state.threats),
+    coverage: threatCoverage(state),
+    openIssues: getValidationIssues(state).length,
+    pendingReviews: assessments.filter((assessment) => assessment.reviewStatus !== 'approved').length,
+    effectiveCountersigns: assessments.filter((assessment) => assessment.effective).length,
+  }
+}

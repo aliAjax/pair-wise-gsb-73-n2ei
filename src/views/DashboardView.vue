@@ -61,9 +61,14 @@ const componentName = (id: string): string =>
         />
       </div>
       <div class="metric">
-        <div class="metric-label">待会签</div>
-        <div class="metric-value">{{ metrics?.pendingReviews ?? store.metrics.pendingReviews }}</div>
-        <div class="metric-note">{{ metrics?.openIssues ?? store.metrics.openIssues }} 项模型校验未关闭</div>
+        <div class="metric-label">待会签 / 有效会签</div>
+        <div class="metric-value">
+          {{ metrics?.pendingReviews ?? store.metrics.pendingReviews }}
+          <span class="metric-sub">/ {{ store.data.threats.length }}</span>
+        </div>
+        <div class="metric-note">
+          {{ store.metrics.effectiveCountersigns }} 条威胁通过有效性核对
+        </div>
       </div>
     </div>
 
@@ -105,6 +110,9 @@ const componentName = (id: string): string =>
                 v1.{{ threat.revision }} ·
                 {{ store.reviewProgress(store.data.decisions.filter((decision) => decision.threatId === threat.id && decision.revision === threat.revision)) }}%
                 会签进度
+                <template v-if="store.assessmentFor(threat.id)?.blockers.length">
+                  · <em class="blocker-count">{{ store.assessmentFor(threat.id)?.blockers.length }} 项核对阻塞</em>
+                </template>
               </span>
             </div>
             <span class="muted">{{ threat.componentIds.map(componentName).join(' / ') }}</span>
@@ -239,5 +247,17 @@ const componentName = (id: string): string =>
 
 .score-tag {
   margin-left: 8px;
+}
+
+.metric-sub {
+  color: #7b8698;
+  font-size: 16px;
+  font-weight: 500;
+}
+
+.blocker-count {
+  color: #c64b39;
+  font-style: normal;
+  font-weight: 700;
 }
 </style>

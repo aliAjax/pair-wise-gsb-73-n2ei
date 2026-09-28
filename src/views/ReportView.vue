@@ -26,11 +26,11 @@ const report = computed(() => {
         )
       : ['- 未包含']),
     '',
-    '## 会签意见',
+    '## 会签意见（按提交顺序，含历史版本）',
     ...(includeDecisions.value
       ? store.data.decisions.map(
           (decision) =>
-            `- ${decision.actor}/${decision.role}/${decision.decision}：${decision.comment}`,
+            `- [v1.${decision.revision}] ${decision.actor}/${decision.role}/${decision.decision}：${decision.comment}`,
         )
       : ['- 未包含']),
     '',

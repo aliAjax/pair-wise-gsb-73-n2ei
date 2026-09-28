@@ -190,10 +190,10 @@ const audit: AuditEvent[] = [
     id: 'aud-03',
     entityType: 'risk',
     entityId: 'risk-03',
-    action: '风险接受即将过期',
+    action: '风险接受已过期',
     actor: '系统',
-    createdAt: '2026-09-28T08:00:00+08:00',
-    detail: '风险接受将在 2026-10-01 过期。',
+    createdAt: '2026-09-16T08:00:00+08:00',
+    detail: '风险接受已于 2026-09-15 过期，TM-003 会签结论暂停生效。',
   },
 ]
 
@@ -498,7 +498,7 @@ export const createSeedState = (): ThreatModelState => ({
       impact: 4,
       status: 'accepted',
       owner: '数据治理组',
-      acceptanceExpiresAt: '2026-10-01',
+      acceptanceExpiresAt: '2026-09-15',
       acceptanceCondition: '过渡期内按日抽检导出记录，发现异常立即冻结账号。',
     },
     {

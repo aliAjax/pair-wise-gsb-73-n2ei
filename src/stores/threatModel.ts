@@ -10,11 +10,20 @@ import type {
 } from '@/models/domain'
 import { createId, loadState, resetState, saveState } from '@/services/repository'
 import {
+  assessAllCountersigns,
+  assessCountersign,
   dashboardMetrics,
-  decisionsForThreat,
   getValidationIssues,
+  isExpired,
   reviewProgress,
 } from '@/services/selectors'
+
+const REVIEW_STATUS_LABELS: Record<string, string> = {
+  draft: '草稿',
+  in_review: '审核中（存在阻塞）',
+  approved: '会签通过',
+  rejected: '已驳回',
+}
 
 type CollectionKey =
   | 'zones'
@@ -39,9 +48,18 @@ export const useThreatModelStore = defineStore('threat-model', () => {
 
   const metrics = computed(() => dashboardMetrics(data.value))
   const issues = computed(() => getValidationIssues(data.value))
+  const countersignAssessments = computed(() => assessAllCountersigns(data.value))
+  const countersignMap = computed(() => {
+    const map = new Map(countersignAssessments.value.map((item) => [item.threatId, item]))
+    return map
+  })
   const pendingReviews = computed(() =>
-    data.value.threats.filter((threat) => threat.reviewStatus === 'in_review'),
+    data.value.threats.filter(
+      (threat) => countersignMap.value.get(threat.id)?.reviewStatus !== 'approved',
+    ),
   )
+
+  const assessmentFor = (threatId: string) => countersignMap.value.get(threatId)
 
   const persist = (): void => {
     saveState(data.value)
@@ -66,6 +84,47 @@ export const useThreatModelStore = defineStore('threat-model', () => {
     data.value.audit.unshift(event)
   }
 
+  /**
+   * 按当前模型状态重新核对每条威胁的会签有效性，并把持久化的 reviewStatus
+   * 与核对结论对齐。历史会签意见不会被改动或删除；只在结论发生变化时记录审计。
+   * 在任何会签依据（意见、证据、风险接受、缓解任务、版本）变更后调用。
+   */
+  const reconcileCountersigns = (): void => {
+    countersignAssessments.value.forEach((assessment) => {
+      const threat = data.value.threats.find((item) => item.id === assessment.threatId)
+      if (!threat || threat.reviewStatus === assessment.reviewStatus) return
+      const previous = threat.reviewStatus
+      threat.reviewStatus = assessment.reviewStatus
+      if (assessment.effective) {
+        appendAudit(
+          'threat',
+          threat.id,
+          '会签核对通过',
+          `${threat.code} 三方意见、证据有效期、风险接受与缓解冲突核对全部通过，结论由“${REVIEW_STATUS_LABELS[previous] ?? previous}”恢复为会签通过。`,
+        )
+      } else if (assessment.reviewStatus === 'rejected') {
+        appendAudit(
+          'threat',
+          threat.id,
+          '会签被驳回',
+          `${threat.code} 存在驳回意见，会签结论由“${REVIEW_STATUS_LABELS[previous] ?? previous}”调整为已驳回。`,
+        )
+      } else {
+        const summary = assessment.blockers
+          .slice(0, 3)
+          .map((blocker) => blocker.title)
+          .join('；')
+        const suffix = assessment.blockers.length > 3 ? ` 等 ${assessment.blockers.length} 项阻塞` : ''
+        appendAudit(
+          'threat',
+          threat.id,
+          '会签核对阻塞',
+          `${threat.code} 原会签结论不再成立（${REVIEW_STATUS_LABELS[previous] ?? previous}）：${summary}${suffix}，已暂停通过结论。`,
+        )
+      }
+    })
+  }
+
   const saveEntity = (collection: CollectionKey, item: IdentifiedEntity): void => {
     const target = data.value[collection] as unknown as IdentifiedEntity[]
     const index = target.findIndex((entry) => entry.id === item.id)
@@ -76,6 +135,9 @@ export const useThreatModelStore = defineStore('threat-model', () => {
     }
     const label = 'name' in item && typeof item.name === 'string' ? item.name : item.id
     appendAudit(collection, item.id, index >= 0 ? '更新' : '新增', `${label} 已保存`)
+    if (['evidence', 'controls', 'mitigations'].includes(collection)) {
+      reconcileCountersigns()
+    }
     persist()
   }
 
@@ -85,6 +147,9 @@ export const useThreatModelStore = defineStore('threat-model', () => {
     if (index < 0) return
     target.splice(index, 1)
     appendAudit(collection, id, '删除', '记录已从当前版本移除')
+    if (['evidence', 'controls', 'mitigations'].includes(collection)) {
+      reconcileCountersigns()
+    }
     persist()
   }
 
@@ -120,9 +185,11 @@ export const useThreatModelStore = defineStore('threat-model', () => {
     }
     data.value.currentRevision = revision
     data.value.versions.unshift(snapshot)
+    // 只有受影响威胁进入新版本重新会签；其余威胁保持原 revision 与既有结论，
+    // 其旧 revision 上的历史会签意见因此仍可查询。
     data.value.threats = data.value.threats.map((threat) => {
       if (!affectedThreatIds.includes(threat.id)) {
-        return { ...threat, revision }
+        return threat
       }
       return { ...threat, revision, reviewStatus: 'in_review' }
     })
@@ -130,8 +197,9 @@ export const useThreatModelStore = defineStore('threat-model', () => {
       'version',
       snapshot.id,
       '创建版本',
-      `${label} 已创建，${affectedThreatIds.length} 条威胁进入重新审核`,
+      `${label} 已创建，${affectedThreatIds.length} 条威胁进入重新审核，其余会签结论保留。`,
     )
+    reconcileCountersigns()
     persist()
     return snapshot
   }
@@ -159,21 +227,8 @@ export const useThreatModelStore = defineStore('threat-model', () => {
       revision: threat.revision,
     })
 
-    const currentDecisions = decisionsForThreat(data.value.decisions, threatId, threat.revision)
-    const requiredRoles: ActorRole[] = ['development', 'security', 'business']
-    const allSubmitted = requiredRoles.every((requiredRole) =>
-      currentDecisions.some((item) => item.role === requiredRole),
-    )
-    if (currentDecisions.some((item) => item.decision === 'rejected')) {
-      threat.reviewStatus = 'rejected'
-    } else if (
-      allSubmitted &&
-      currentDecisions.every((item) => item.decision === 'approved')
-    ) {
-      threat.reviewStatus = 'approved'
-    } else {
-      threat.reviewStatus = 'in_review'
-    }
+    const assessment = assessCountersign(data.value, threat)
+    threat.reviewStatus = assessment.reviewStatus
 
     const decisionLabel: Record<DecisionType, string> = {
       accept: '接受',
@@ -186,8 +241,15 @@ export const useThreatModelStore = defineStore('threat-model', () => {
       'threat',
       threatId,
       decisionLabel[decision],
-      `${actor}（${role}）提交会签意见`,
+      `${actor}（${role}）提交会签意见；核对结论：${
+        assessment.effective
+          ? '会签通过'
+          : assessment.reviewStatus === 'rejected'
+            ? '已驳回'
+            : `存在 ${assessment.blockers.length} 项阻塞，不能通过`
+      }`,
     )
+    reconcileCountersigns()
     persist()
   }
 
@@ -199,6 +261,7 @@ export const useThreatModelStore = defineStore('threat-model', () => {
     if (!task) return
     task.status = status
     appendAudit('mitigation', task.id, '更新状态', `${task.title} 更新为 ${status}`)
+    reconcileCountersigns()
     persist()
   }
 
@@ -209,6 +272,7 @@ export const useThreatModelStore = defineStore('threat-model', () => {
     risk.acceptanceExpiresAt = expiresAt
     risk.acceptanceCondition = condition
     appendAudit('risk', risk.id, '接受风险', `接受有效至 ${expiresAt}：${condition}`)
+    reconcileCountersigns()
     persist()
   }
 
@@ -217,15 +281,26 @@ export const useThreatModelStore = defineStore('threat-model', () => {
     if (!risk) return
     risk.status = 'closed'
     appendAudit('risk', risk.id, '关闭风险', '风险已关闭并从开放风险中移除')
+    reconcileCountersigns()
     persist()
   }
 
   const resetDemo = (): void => {
     data.value = resetState()
+    reconcileCountersigns()
+    persist()
     lastSavedAt.value = new Date().toISOString()
   }
 
+  // 首次加载时按当前证据/风险接受/缓解状态对持久化的会签结论做一次对账，
+  // 防止页面与报告继续展示历史遗留的“假通过”。
+  reconcileCountersigns()
+  persist()
+
   const exportReport = (): string => {
+    const assessments = assessAllCountersigns(data.value)
+    const effectiveCount = assessments.filter((item) => item.effective).length
+    const blocked = assessments.filter((item) => !item.effective)
     const lines = [
       `# ${data.value.boundary.name} 威胁建模报告`,
       '',
@@ -241,28 +316,51 @@ export const useThreatModelStore = defineStore('threat-model', () => {
       `- 威胁覆盖率：${metrics.value.coverage}%`,
       `- 待处理校验问题：${issues.value.length}`,
       '',
+      '## 会签有效性核对',
+      `- 有效会签：${effectiveCount}/${data.value.threats.length}（三方意见、证据有效期、风险接受期限、缓解冲突同次核对）`,
+      `- 不能通过：${blocked.length} 条`,
+      ...(blocked.length === 0
+        ? ['- 全部威胁核对通过，无阻塞项。']
+        : blocked.flatMap((assessment) => {
+            const threat = data.value.threats.find((item) => item.id === assessment.threatId)
+            const header = [
+              `- 【阻塞】${threat?.code ?? assessment.threatId} ${threat?.title ?? ''}（v1.${assessment.revision}，结论：${
+                assessment.reviewStatus === 'rejected' ? '已驳回' : '暂停通过'
+              }，${assessment.blockers.length} 项）`,
+            ]
+            return header.concat(
+              assessment.blockers.map(
+                (blocker) =>
+                  `  - [${blocker.label}] ${blocker.title}｜${blocker.currentValue}｜待补动作：${blocker.remediation}`,
+              ),
+            )
+          })),
+      '',
       '## 威胁清单',
-      ...data.value.threats.map(
-        (threat) =>
-          `- ${threat.code} [${threat.severity}/${threat.reviewStatus}] ${threat.title}：${threat.description}`,
-      ),
+      ...data.value.threats.map((threat) => {
+        const effective = assessments.find((item) => item.threatId === threat.id)?.effective
+        return `- ${threat.code} [${threat.severity}/${threat.reviewStatus}${effective ? '' : '/会签失效'}] ${threat.title}：${threat.description}`
+      }),
       '',
       '## 风险接受',
       ...data.value.risks
         .filter((risk) => risk.status === 'accepted')
-        .map(
-          (risk) =>
-            `- ${risk.code} ${risk.title}，有效至 ${risk.acceptanceExpiresAt ?? '未设置'}，条件：${risk.acceptanceCondition ?? '未填写'}`,
-        ),
+        .map((risk) => {
+          const expired = isExpired(risk.acceptanceExpiresAt)
+          return `- ${risk.code} ${risk.title}，有效至 ${risk.acceptanceExpiresAt ?? '未设置'}${expired ? '（已过期，会签阻塞）' : ''}，条件：${risk.acceptanceCondition ?? '未填写'}`
+        }),
       '',
       '## 校验问题',
       ...issues.value.map((issue) => `- [${issue.severity}] ${issue.title}：${issue.detail}`),
       '',
-      '## 会签记录',
-      ...data.value.decisions.map(
-        (decision) =>
-          `- ${decision.createdAt} ${decision.actor}（${decision.role}）${decision.decision}：${decision.comment}`,
-      ),
+      '## 会签记录（含历史版本）',
+      ...data.value.decisions
+        .slice()
+        .sort((a, b) => (a.revision === b.revision ? 0 : a.revision < b.revision ? 1 : -1))
+        .map(
+          (decision) =>
+            `- [v1.${decision.revision}] ${decision.createdAt} ${decision.actor}（${decision.role}）${decision.decision}：${decision.comment}`,
+        ),
     ]
     return lines.join('\n')
   }
@@ -273,6 +371,9 @@ export const useThreatModelStore = defineStore('threat-model', () => {
     metrics,
     issues,
     pendingReviews,
+    countersignAssessments,
+    assessmentFor,
+    reconcileCountersigns,
     saveEntity,
     removeEntity,
     updateBoundary,
